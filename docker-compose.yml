@@ -1,0 +1,159 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.1
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://keycloak.localhost:8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
+    networks:
+      default:
+        aliases:
+          - keycloak.localhost
+
+  keycloak-ready:
+    image: curlimages/curl:8.14.1
+    depends_on:
+      - keycloak
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until curl -fsS http://keycloak:8080/realms/demo/.well-known/openid-configuration >/dev/null; do
+          echo "Waiting for Keycloak..."
+          sleep 2
+        done
+        echo "Keycloak ready."
+
+  opensearch:
+    image: opensearchproject/opensearch:3.8.0
+    environment:
+      discovery.type: single-node
+      bootstrap.memory_lock: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: ${OPENSEARCH_ADMIN_PASSWORD}
+      # Demo only: Security plugin stays active, HTTP TLS is disabled.
+      plugins.security.ssl.http.enabled: "false"
+
+      # Demo bootstrap only: allow the built-in all_access role to manage
+      # roles and role mappings through the Security REST API.
+      plugins.security.restapi.roles_enabled: '["all_access"]'
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+      - ./opensearch/config.yml:/usr/share/opensearch/config/opensearch-security/config.yml:ro
+    depends_on:
+      keycloak-ready:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS -u admin:$${OPENSEARCH_INITIAL_ADMIN_PASSWORD} http://localhost:9200/_cluster/health >/dev/null || exit 1"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  opensearch-init:
+    image: curlimages/curl:8.14.1
+    environment:
+      OPENSEARCH_ADMIN_PASSWORD: ${OPENSEARCH_ADMIN_PASSWORD}
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+
+        echo "Creating restricted OpenSearch role demo_reader..."
+
+        curl -fsS -u "admin:$${OPENSEARCH_ADMIN_PASSWORD}" \
+          -H 'Content-Type: application/json' \
+          -X PUT http://opensearch:9200/_plugins/_security/api/roles/demo_reader \
+          -d '{
+            "cluster_permissions": [],
+            "index_permissions": [
+              {
+                "index_patterns": ["demo-data"],
+                "allowed_actions": ["read"]
+              }
+            ],
+            "tenant_permissions": []
+          }' >/dev/null
+
+        curl -fsS -u "admin:$${OPENSEARCH_ADMIN_PASSWORD}" \
+          -H 'Content-Type: application/json' \
+          -X PUT http://opensearch:9200/_plugins/_security/api/rolesmapping/demo_reader \
+          -d '{
+            "backend_roles": ["os_allow_read"],
+            "hosts": [],
+            "users": []
+          }' >/dev/null
+
+        echo "Mapping os_allow_read -> demo_reader created."
+
+        curl -fsS -u "admin:$${OPENSEARCH_ADMIN_PASSWORD}" \
+          -H 'Content-Type: application/json' \
+          -X PUT http://opensearch:9200/demo-data \
+          -d '{
+            "mappings": {
+              "properties": {
+                "title": { "type": "text" },
+                "category": { "type": "keyword" },
+                "value": { "type": "integer" }
+              }
+            }
+          }' >/dev/null || true
+
+        curl -fsS -u "admin:$${OPENSEARCH_ADMIN_PASSWORD}" \
+          -H 'Content-Type: application/json' \
+          -X PUT http://opensearch:9200/demo-data/_doc/1 \
+          -d '{"title":"Alpha sensor","category":"sensor","value":42}' >/dev/null
+
+        curl -fsS -u "admin:$${OPENSEARCH_ADMIN_PASSWORD}" \
+          -H 'Content-Type: application/json' \
+          -X PUT http://opensearch:9200/demo-data/_doc/2 \
+          -d '{"title":"Beta meter","category":"meter","value":73}' >/dev/null
+
+        curl -fsS -u "admin:$${OPENSEARCH_ADMIN_PASSWORD}" \
+          -H 'Content-Type: application/json' \
+          -X PUT 'http://opensearch:9200/demo-data/_doc/3?refresh=true' \
+          -d '{"title":"Gamma inverter","category":"inverter","value":91}' >/dev/null
+
+        echo "Dummy data created."
+
+  app:
+    build:
+      context: ./app
+    environment:
+      OPENSEARCH_URL: http://opensearch:9200
+      KEYCLOAK_BASE_URL: http://keycloak.localhost:8080
+      KEYCLOAK_REALM: demo
+      KEYCLOAK_REDIRECT_URI: http://localhost:8081/callback
+      KEYCLOAK_CLIENT_ID: demo-app
+      KEYCLOAK_CLIENT_SECRET: demo-app-secret
+    ports:
+      - "8081:8081"
+    depends_on:
+      keycloak-ready:
+        condition: service_completed_successfully
+      opensearch-init:
+        condition: service_completed_successfully
+
+volumes:
+  opensearch-data:
