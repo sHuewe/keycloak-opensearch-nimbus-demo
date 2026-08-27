@@ -1,24 +1,38 @@
-# Keycloak → Nimbus OIDC → OpenSearch (Java 8)
+# Keycloak → Auth Manager → OpenSearch (Java 8)
 
-Dieses Demo zeigt Authentifizierung **und** Autorisierung ohne Spring Boot und
-ohne Spring Security. Die Anwendung ist eine reine Java-8-Anwendung mit
-`com.sun.net.httpserver.HttpServer`; für OAuth 2.0 / OpenID Connect wird Nimbus
-`oauth2-oidc-sdk` verwendet.
+Dieses Demo zeigt Authentifizierung und Autorisierung ohne Spring Boot und ohne Spring Security. Die eigentliche Demo-App kommuniziert **nicht mehr direkt mit Keycloak**. Stattdessen übernimmt ein separater `auth-manager` den gesamten OIDC-Flow einschließlich Refresh Token.
 
-## Ziel der Demo
-
-Der Benutzer `demo` kann sich immer über Keycloak anmelden. Lesen aus OpenSearch
-darf er aber nur, solange Keycloak ihm die Realm-Rolle `os_allow_read` gibt.
+## Architektur
 
 ```text
-Keycloak Realm Role       OpenSearch backend role      OpenSearch role
-os_allow_read       --->  os_allow_read          --->  demo_reader
-                                                        |
-                                                        +-- read auf demo-data
+Browser
+  |
+  | /login
+  v
+Demo-App :8081
+  |
+  | Redirect mit authId
+  v
+Auth Manager :8082
+  |
+  | Authorization Code Flow
+  v
+Keycloak :8080
+  |
+  | callback
+  v
+Auth Manager
+  |
+  | Access Token + Refresh Token serverseitig pro authId
+  |
+  +<---------------- Demo-App fragt gültigen Access Token ab
+                         |
+                         | Authorization: Bearer <access_token>
+                         v
+                    OpenSearch :9200
 ```
 
-Damit lässt sich der Unterschied zwischen **Authentifizierung** und
-**Autorisierung** direkt beobachten.
+Die App kennt weder Keycloak-Endpunkte noch Client Secret noch Refresh Token. Nimbus OIDC wird ausschließlich im `auth-manager` verwendet.
 
 ## Start
 
@@ -29,158 +43,113 @@ docker compose up --build
 Danach:
 
 - App: http://localhost:8081
+- Auth Manager: http://localhost:8082
 - Keycloak: http://keycloak.localhost:8080
 - OpenSearch: http://localhost:9200
 
-### Demo-Login
+Demo-Login: `demo` / `demo`
 
-- Benutzer: `demo`
-- Passwort: `demo`
+Keycloak-Admin: `admin` / `admin`
 
-Keycloak-Admin:
+## Ablauf
 
-- Benutzer: `admin`
-- Passwort: `admin`
+1. Die App erzeugt pro lokaler Session eine zufällige `authId`.
+2. `/login` der App redirectet zu `http://localhost:8082/login?authId=...`.
+3. Der Auth Manager erzeugt mit Nimbus `state` und `nonce` und leitet den Browser zu Keycloak weiter.
+4. Keycloak ruft nach erfolgreichem Login `http://localhost:8082/callback` auf.
+5. Nur der Auth Manager tauscht den Authorization Code gegen Access-, Refresh- und ID-Token.
+6. Der Auth Manager validiert das ID Token und speichert die Tokens serverseitig unter der `authId`.
+7. Die App fragt vor einem OpenSearch-Aufruf `GET /token?authId=...` beim Auth Manager an.
+8. Ist der Access Token fast abgelaufen, refresht der Auth Manager ihn selbstständig.
+9. Die App sendet den erhaltenen Access Token als `Authorization: Bearer ...` an OpenSearch.
 
-## Autorisierungs-Demo
+## Autorisierung
 
-### Ausgangszustand: Lesen erlaubt
-
-Der importierte Benutzer `demo` besitzt in Keycloak ausschließlich die
-Realm-Rolle:
+Der Benutzer `demo` besitzt in Keycloak die Realm-Rolle:
 
 ```text
 os_allow_read
 ```
 
-Der Realm-Role-Mapper schreibt sie in den Access Token:
-
-```json
-{
-  "preferred_username": "demo",
-  "roles": ["os_allow_read"],
-  "aud": ["opensearch"]
-}
-```
-
-OpenSearch liest `roles` als Backend-Rollen. Beim Start erzeugt
-`opensearch-init` über die Security REST API die eingeschränkte Rolle
-`demo_reader`:
-
-```json
-{
-  "cluster_permissions": [],
-  "index_permissions": [
-    {
-      "index_patterns": ["demo-data"],
-      "allowed_actions": ["read"]
-    }
-  ],
-  "tenant_permissions": []
-}
-```
-
-und mappt:
+Der Access Token enthält diese Rolle im Claim `roles`. OpenSearch mappt:
 
 ```text
-os_allow_read -> demo_reader
+Keycloak role       OpenSearch backend role    OpenSearch role
+os_allow_read  ---> os_allow_read         ---> demo_reader
+                                             |
+                                             +-- read auf demo-data
 ```
 
-`/search` funktioniert daher zunächst. `/whoami` sollte unter anderem
-`os_allow_read` als Backend-Rolle und `demo_reader` als OpenSearch-Rolle zeigen.
+Entfernst du `os_allow_read` in Keycloak und rufst in der App `/refresh` auf, erzeugt ausschließlich der Auth Manager einen neuen Access Token. Danach liefert `/search` HTTP 403.
 
-### Rolle in Keycloak entziehen
+## Services
 
-1. Öffne http://keycloak.localhost:8080/admin/ und melde dich mit `admin/admin` an.
-2. Wähle den Realm `demo`.
-3. Öffne `Users` → `demo` → `Role mapping`.
-4. Entferne die Realm-Rolle `os_allow_read`.
-5. Gehe in der Demo-App auf `/refresh`, damit sofort ein neuer Access Token
-   ausgestellt wird. Alternativ maximal ca. 60 Sekunden warten.
-6. Prüfe `/token-info`: `os_allow_read` darf im neuen Access Token nicht mehr
-   enthalten sein.
-7. Rufe `/whoami` auf: OpenSearch kennt den Benutzer weiterhin, aber
-   `demo_reader` fehlt.
-8. Rufe `/search` auf: OpenSearch antwortet jetzt mit **HTTP 403 Forbidden**.
+### app
 
-Das ist bewusst **kein 401**: Der Access Token ist weiterhin gültig und der
-Benutzer wurde erfolgreich authentifiziert. Ihm fehlt lediglich die benötigte
-Berechtigung für `demo-data`.
+Reines Java 8. Verantwortlich für:
 
-### Rolle wieder vergeben
+- Benutzeroberfläche der Demo
+- lokale Session / `authId`
+- Token-Anfrage beim Auth Manager
+- Weitergabe des Access Tokens an OpenSearch
 
-Vergib `os_allow_read` in Keycloak wieder, rufe `/refresh` auf und danach erneut
-`/search`. Die Suche funktioniert wieder.
+Die App hat **keine Nimbus-Abhängigkeit** und keine Keycloak-Konfiguration.
 
-## Warum ein bereits ausgestellter Token noch funktioniert
+### auth-manager
 
-Keycloak ändert bereits signierte JWTs nicht nachträglich. Wenn der aktuelle
-Access Token noch
+Reines Java 8 mit Nimbus `oauth2-oidc-sdk`. Verantwortlich für:
 
-```json
-"roles": ["os_allow_read"]
-```
+- Erzeugen der Keycloak-Login-URL
+- `state` und `nonce`
+- Callback-Verarbeitung
+- Authorization-Code-Exchange
+- ID-Token-Validierung
+- Speicherung von Access- und Refresh-Token
+- automatischen und erzwungenen Refresh
+- Bereitstellung eines gültigen Access Tokens für die App
 
-enthält, darf OpenSearch bis zum Ablauf dieses Tokens weiter lesen. Das Demo setzt
-die Access-Token-Lebensdauer deshalb bewusst auf 60 Sekunden. `/refresh` macht die
-Änderung unmittelbar sichtbar.
+### OpenSearch
 
-## Interessante Endpunkte
+Validiert den Keycloak Access Token und mappt `os_allow_read` auf die eingeschränkte Rolle `demo_reader`.
 
-- `/login` – startet den Authorization-Code-Flow
-- `/callback` – verarbeitet `code` + `state` und holt Tokens
-- `/search` – liest `demo-data` mit dem Keycloak Access Token; zeigt bei fehlendem Recht explizit 403
-- `/whoami` – ruft `/_plugins/_security/authinfo` auf
-- `/token-info` – zeigt JWT-Claims und für die Demo auch rohe Tokens
-- `/refresh` – erzwingt einen Refresh über `RefreshTokenGrant`
+## Wichtige Endpunkte
 
-## Nimbus-Abhängigkeit
+App:
 
-```xml
-<dependency>
-  <groupId>com.nimbusds</groupId>
-  <artifactId>oauth2-oidc-sdk</artifactId>
-  <version>11.38.1</version>
-  <classifier>jdk8</classifier>
-</dependency>
-```
+- `/login` – startet den Login über den Auth Manager
+- `/search` – liest `demo-data`
+- `/whoami` – zeigt OpenSearch `authinfo`
+- `/token-info` – zeigt den vom Auth Manager gelieferten Access Token
+- `/refresh` – fordert den Auth Manager zu einem sofortigen Refresh auf
 
-## Token an OpenSearch weitergeben
+Auth Manager:
 
-In `OpenSearchService` bleibt die relevante Zeile sichtbar:
-
-```java
-connection.setRequestProperty(
-        "Authorization",
-        accessToken.toAuthorizationHeader());
-```
-
-Nimbus erzeugt daraus:
-
-```text
-Authorization: Bearer eyJ...
-```
-
-OpenSearch validiert den Token und verwendet den Claim `roles` als
-`backend_roles`. Die konkrete Indexberechtigung kommt erst über das
-OpenSearch-Role-Mapping zustande.
+- `/login?authId=...&returnUrl=...`
+- `/callback`
+- `/token?authId=...`
+- `/refresh?authId=...`
+- `/status?authId=...`
 
 ## Docker-intern vs. Browser
 
-- Browser/Public Keycloak URL: `http://keycloak.localhost:8080`
-- Docker-Service-Name für Readiness: `http://keycloak:8080`
+Keycloak hat zwei Sichtweisen:
 
-`KC_HOSTNAME` bleibt auf der öffentlichen URL, damit Keycloak im Browser keine
-Docker-internen `keycloak:8080`-URLs erzeugt.
+- Browser / Issuer: `http://keycloak.localhost:8080`
+- Container-intern: `http://keycloak:8080`
 
-## Bewusste Demo-Vereinfachungen
+Der Auth Manager nutzt deshalb getrennte öffentliche und interne Keycloak-URLs.
 
-- HTTP statt HTTPS zwischen den Containern
-- Tokens werden in `/token-info` angezeigt
-- Session-Speicher nur im RAM
-- kein Keycloak-End-Session-Logout; `/logout` löscht nur die lokale Session
-- `all_access` darf im Demo-Cluster über die Security REST API die Bootstrap-Rolle
-  `demo_reader` anlegen; der Demo-Benutzer selbst erhält dieses Recht nicht
+Genauso nutzt die App:
 
-Für Produktion wären TLS, persistente Session-/Keycloak-Daten, restriktive
-Bootstrap-Rechte und ein vollständiges Logout-Konzept zu ergänzen.
+- Browser-URL des Auth Managers: `http://localhost:8082`
+- Docker-intern: `http://auth-manager:8082`
+
+## Demo-Vereinfachungen
+
+- HTTP statt HTTPS
+- Token-Speicher nur im RAM des Auth Managers
+- `authId` ist im Demo ein zufälliger opaque Identifier
+- `/token`, `/refresh` und `/status` liegen im Demo auf demselben veröffentlichten Port wie `/login` und `/callback`
+- kein vollständiges Logout-/Revocation-Konzept
+
+Für Produktion sollte die Token-API des Auth Managers zusätzlich intern bzw. gerätegebunden abgesichert werden, z. B. über einen separaten nur intern erreichbaren Listener, mTLS oder eine vergleichbare Service-Authentisierung. Der Browser benötigt nur die Login- und Callback-Seite; Refresh Tokens dürfen den Auth Manager nicht verlassen.
