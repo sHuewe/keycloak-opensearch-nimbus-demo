@@ -14,7 +14,7 @@
   "clients": [
     {
       "clientId": "demo-app",
-      "name": "Java Demo App",
+      "name": "Authentication Manager",
       "enabled": true,
       "protocol": "openid-connect",
       "clientAuthenticatorType": "client-secret",
@@ -24,10 +24,10 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "redirectUris": [
-        "http://localhost:8081/callback"
+        "http://localhost:8082/callback"
       ],
       "webOrigins": [
-        "http://localhost:8081"
+        "http://localhost:8082"
       ],
       "protocolMappers": [
         {
@@ -74,9 +74,7 @@
           "temporary": false
         }
       ],
-      "realmRoles": [
-        "os_allow_read"
-      ]
+      "realmRoles": ["os_allow_read"]
     }
   ]
 }
