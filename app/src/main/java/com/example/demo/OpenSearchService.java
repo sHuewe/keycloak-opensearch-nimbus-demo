@@ -1,7 +1,5 @@
 package com.example.demo;
 
-import com.nimbusds.oauth2.sdk.token.AccessToken;
-
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -13,11 +11,11 @@ import java.nio.charset.StandardCharsets;
 
 public final class OpenSearchService {
     private final String baseUrl;
-    private final NimbusOidcClient oidcClient;
+    private final AuthManagerClient authManager;
 
-    public OpenSearchService(String baseUrl, NimbusOidcClient oidcClient) {
+    public OpenSearchService(String baseUrl, AuthManagerClient authManager) {
         this.baseUrl = baseUrl;
-        this.oidcClient = oidcClient;
+        this.authManager = authManager;
     }
 
     public String search(SessionData session) throws Exception {
@@ -33,18 +31,14 @@ public final class OpenSearchService {
                         String method,
                         String path,
                         String body) throws Exception {
-        TokenSet tokenSet = oidcClient.ensureValidAccessToken(session);
-        AccessToken accessToken = tokenSet.getAccessToken();
+        String accessToken = authManager.getAccessToken(session);
 
         HttpURLConnection connection = (HttpURLConnection) new URL(baseUrl + path).openConnection();
         connection.setRequestMethod(method);
         connection.setConnectTimeout(5000);
         connection.setReadTimeout(10000);
         connection.setRequestProperty("Accept", "application/json");
-
-        // This is the hand-off to OpenSearch. Nimbus creates the exact RFC 6750 header:
-        // Authorization: Bearer <access_token>
-        connection.setRequestProperty("Authorization", accessToken.toAuthorizationHeader());
+        connection.setRequestProperty("Authorization", "Bearer " + accessToken);
 
         if (body != null) {
             byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
@@ -69,16 +63,12 @@ public final class OpenSearchService {
     }
 
     private static String readAll(InputStream input) throws IOException {
-        if (input == null) {
-            return "";
-        }
+        if (input == null) return "";
         BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8));
         try {
             StringBuilder result = new StringBuilder();
             String line;
-            while ((line = reader.readLine()) != null) {
-                result.append(line).append('\n');
-            }
+            while ((line = reader.readLine()) != null) result.append(line).append('\n');
             return result.toString();
         } finally {
             reader.close();
