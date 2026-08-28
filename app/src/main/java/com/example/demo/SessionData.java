@@ -1,44 +1,17 @@
 package com.example.demo;
 
-import com.nimbusds.oauth2.sdk.id.State;
-import com.nimbusds.openid.connect.sdk.Nonce;
+import java.util.UUID;
 
 public final class SessionData {
-    private volatile State expectedState;
-    private volatile Nonce expectedNonce;
-    private volatile TokenSet tokens;
+    private final String authId;
 
-    public State getExpectedState() {
-        return expectedState;
+    public SessionData() {
+        // The demo app owns the authId. The auth manager only receives this
+        // opaque identifier and stores the corresponding tokens under it.
+        this.authId = UUID.randomUUID().toString();
     }
 
-    public void setExpectedState(State expectedState) {
-        this.expectedState = expectedState;
-    }
-
-    public Nonce getExpectedNonce() {
-        return expectedNonce;
-    }
-
-    public void setExpectedNonce(Nonce expectedNonce) {
-        this.expectedNonce = expectedNonce;
-    }
-
-    public TokenSet getTokens() {
-        return tokens;
-    }
-
-    public void setTokens(TokenSet tokens) {
-        this.tokens = tokens;
-    }
-
-    public void clearLoginAttempt() {
-        this.expectedState = null;
-        this.expectedNonce = null;
-    }
-
-    public void clear() {
-        clearLoginAttempt();
-        this.tokens = null;
+    public String getAuthId() {
+        return authId;
     }
 }
